@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>تتبع القراءة بالكلام — عربي وإنجليزي</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: #f3f4f6;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .container {
+      background: white;
+      border-radius: 14px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+      padding: 24px;
+      width: 100%;
+      max-width: 900px;
+    }
+    h1 {margin-top: 0; font-size: 22px;}
+    textarea {
+      width: 100%;
+      min-height: 180px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 17px;
+      line-height: 1.6;
+      direction: auto;
+    }
+    .output {
+      margin-top: 16px;
+      font-size: 20px;
+      line-height: 1.8;
+      border: 1px dashed #e5e7eb;
+      border-radius: 10px;
+      padding: 12px;
+      min-height: 140px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .highlight {
+      background: linear-gradient(90deg, #fde047, #facc15);
+      border-radius: 6px;
+      box-shadow: 0 0 8px 3px rgba(250, 204, 21, 0.6);
+      transform: scale(1.1);
+      transition: all 0.2s ease-in-out;
+    }
+    .controls {
+      margin-top: 14px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    button {
+      padding: 10px 14px;
+      border: 0;
+      border-radius: 10px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button.primary { background: #2563eb; color: white; }
+    button.ghost { background: transparent; border: 1px solid #d1d5db; }
+    button.warn { background: #ef4444; color: white; }
+    select { padding: 8px; border-radius: 8px; border: 1px solid #d1d5db; }
+    .status { margin-top: 12px; color: #065f46; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎤 تتبع القراءة بالكلام (Glow + Scale)</h1>
+    <textarea id="textInput" placeholder="اكتب هنا النص الذي ستقرأه بصوتك..."></textarea>
+
+    <div class="controls">
+      <button id="startBtn" class="primary">ابدأ التتبع</button>
+      <button id="stopBtn" class="ghost">توقّف</button>
+      <button id="clearBtn" class="warn">مسح</button>
+      <label>اللغة:
+        <select id="lang">
+          <option value="ar-EG">العربية (مصر)</option>
+          <option value="en-US">English (US)</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="status" class="status">الحالة: جاهز</div>
+
+    <div id="output" class="output"></div>
+  </div>
+
+  <script>
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const langSelect = document.getElementById('lang');
+    const statusEl = document.getElementById('status');
+    const textInput = document.getElementById('textInput');
+    const output = document.getElementById('output');
+
+    let recognizer = null;
+    let words = [];
+    let currentIndex = -1;
+
+    function renderText() {
+        output.innerHTML = ""; // مسح النص السابق
+        words.forEach((word, idx) => {
+            const span = document.createElement("span");
+            span.textContent = word + " ";
+            span.dataset.index = idx;
+
+            if (idx === currentIndex) {
+                span.classList.add("highlight"); // الكلمة الحالية
+            }
+
+            // إخفاء كل الكلمات بعد الكلمة الحالية
+            if (idx > currentIndex) {
+                span.style.display = "none";
+            }
+
+            output.appendChild(span);
+        });
+
+        output.scrollTop = output.scrollHeight; // تمرير تلقائي لو النص طويل
+    }
+
+    // 🔤 دالة إزالة التشكيل والعلامات من النص العربي للمقارنة فقط
+    function normalizeArabic(text) {
+        let replaces = {
+            "الم": "الف لام ميم"
+        }
+
+        let normalized = text
+          .replace(/[\u0610-\u061A\u064B-\u065F\u06D6-\u06ED]/g, "") // إزالة كل التشكيل وعلامات الوقف والسكون
+          .replace("وٰ", "ا") // الصلوة -> الصلاة
+          .replace(/\u0670/g, "ا") // تحويل الألف الصغيرة (ٱ، ٰ) إلى ألف عادية
+          .replace("هاذا", "هذا")
+          .replace(/[ًٌٍَُِّْـ]/g, '') // حذف التشكيل
+          .replace(/[ٱإأآا]/g, 'ا')   // توحيد الألف
+          .replace(/ى/g, 'ي')         // توحيد الألف المقصورة
+          .replace(/ؤ/g, 'و')
+          .replace(/ئ/g, 'ي')
+          .replace(/ة/g, 'ه')
+          .toLowerCase();
+        
+        // تطبيق الاستبدالات الخاصة من الخريطة
+        Object.keys(replaces).forEach(key => {
+            const re = new RegExp(key, "g");
+            normalized = normalized.replace(re, replaces[key]);
+        });
+
+        return normalized;
+    }
+
+    function startRecognition() {
+      if (!SpeechRecognition) {
+        alert('المتصفح لا يدعم ميزة التعرف على الكلام. استخدم Chrome أو Edge.');
+        return;
+      }
+
+      const text = textInput.value.trim();
+      if (!text) {
+        alert('من فضلك اكتب نص أولاً');
+        return;
+      }
+
+      words = text.split(/\s+/);
+      currentIndex = -1;
+      renderText();
+
+      recognizer = new SpeechRecognition();
+      recognizer.lang = langSelect.value;
+      recognizer.interimResults = true;
+      recognizer.continuous = true;
+
+      recognizer.onstart = () => { statusEl.textContent = 'الحالة: يستمع...'; };
+      recognizer.onerror = e => { statusEl.textContent = 'خطأ: ' + (e.error || ''); };
+      recognizer.onend = () => { statusEl.textContent = 'الحالة: متوقف'; };
+
+      recognizer.onresult = (e) => {
+        let result = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          result += e.results[i][0].transcript + ' ';
+        }
+        const said = result.trim();
+        if (said) {
+            console.log("🗣️ الصوت المسموع:", said);
+            checkMatch(said);
+        }
+      };
+
+      recognizer.start();
+    }
+
+    function stopRecognition() {
+      if (recognizer) {
+        recognizer.stop();
+        recognizer = null;
+      }
+      statusEl.textContent = 'الحالة: متوقف';
+    }
+
+    let lastSpoken = "";
+function checkMatch(spoken) {
+    const spokenWords = spoken.split(/\s+/);
+    const lastWord = spokenWords[spokenWords.length - 1];
+    if (!lastWord) return;
+
+    const spokenNorm = normalizeArabic(lastWord);
+
+    let nextIndex = -1;
+    let prevIndex = -1;
+
+    // البحث في نافذة ±2 قبل و+4 بعد currentIndex
+    const start = Math.max(0, currentIndex - 2);
+    const end = Math.min(words.length, currentIndex + 2);
+
+    for (let i = start; i < end; i++) {
+        const cleanW = normalizeArabic(words[i]);
+        if (cleanW === spokenNorm || cleanW.startsWith(spokenNorm)) {
+            if (i > currentIndex) {
+                nextIndex = i; // أولوية للكلمة اللي بعد الحالية مباشرةً
+                break;
+            } else if (i === currentIndex && nextIndex === -1) {
+                nextIndex = i; // لو مفيش كلمة بعدها، اتحرك للكلمة دي
+            } else {
+                prevIndex = i; // الرجوع لو مش لاقيين قدام
+            }
+        }
+    }
+
+    // إذا currentIndex = -1 (أول كلمة منطوقة)
+    if (currentIndex === -1) {
+        for (let i = 0; i < words.length; i++) {
+            const cleanW = normalizeArabic(words[i]);
+            if (cleanW === spokenNorm || cleanW.startsWith(spokenNorm)) {
+                currentIndex = i;
+                renderText();
+                console.log("✅ تم تحديد أول كلمة:", words[i]);
+                return;
+            }
+        }
+    }
+
+    // تحديث المؤشر حسب الأولوية
+    if (nextIndex !== -1) {
+        currentIndex = nextIndex;
+        renderText();
+        console.log("✅ تم تحديد:", words[currentIndex]);
+    } else if (prevIndex !== -1) {
+        currentIndex = prevIndex;
+        renderText();
+        console.log("✅ تم تحديد (رجوع):", words[currentIndex]);
+    }
+}
+
+    startBtn.onclick = startRecognition;
+    stopBtn.onclick = stopRecognition;
+    clearBtn.onclick = () => {
+      textInput.value = '';
+      output.innerHTML = '';
+      statusEl.textContent = 'الحالة: جاهز';
+    };
+  </script>
+</body>
+</html>
